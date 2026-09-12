@@ -29,5 +29,6 @@ CREATE TABLE IF NOT EXISTS content_queue (
 CREATE TABLE IF NOT EXISTS chat_state (
   chat_id TEXT PRIMARY KEY,
   last_report_at TEXT,
-  timezone TEXT DEFAULT 'Europe/Moscow'
+  timezone TEXT DEFAULT 'Europe/Moscow',
+  pending_action TEXT
 );

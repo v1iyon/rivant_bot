@@ -59,7 +59,7 @@ node scripts/init-db.js
 ## Шаг 8. Подключи Telegram webhook к твоему Vercel-проекту
 Открой в браузере (подставь свой домен и секреты):
 ```
-https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<твой-проект>.vercel.app/api/telegram-webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>
+https://api.telegram.org/bot8420748322:AAG8DuMRj0RwkQ4WVgJrclgEthZunRqJxyI/setWebhook?url=https://rivant-bot-ichy.vercel.app/api/telegram-webhook&secret_token=3bfb4c7e1ec0888d47582f24ffeb7774
 ```
 Должно вернуть `{"ok":true,...}`.
 

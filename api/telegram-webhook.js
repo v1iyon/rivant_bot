@@ -1,16 +1,29 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { askClaude } from "../lib/claude.js";
-import { sendTelegramMessage } from "../lib/telegram.js";
-import { savePost, getAllPosts, addQueueIdeas, getNextQueuedIdea, markIdeaSent } from "../lib/db.js";
+import { sendTelegramMessage, MAIN_MENU } from "../lib/telegram.js";
+import {
+  savePost,
+  getAllPosts,
+  addQueueIdeas,
+  getPendingAction,
+  setPendingAction,
+} from "../lib/db.js";
 
 const SYSTEM_PROMPT = readFileSync(
   join(process.cwd(), "prompts", "system-prompt.md"),
   "utf-8"
 );
 
+const HELP_TEXT = `Вот что я умею:
+
+📊 *Отчёт* — анализ всех твоих постов: что заходит, что нет, паттерны
+💡 *Идеи* — новые идеи постов на основе данных
+✍️ *Ответ на твит* — пришлю черновик ответа клиенту
+
+Чтобы записать новый пост — просто напиши мне про него в свободной форме: дата, время, тема, просмотры, лайки и т.д. Я сам разберу.`;
+
 export default async function handler(req, res) {
-  // Проверка секрета Telegram (защита от чужих запросов)
   if (req.headers["x-telegram-bot-api-secret-token"] !== process.env.TELEGRAM_WEBHOOK_SECRET) {
     return res.status(401).send("unauthorized");
   }
@@ -25,14 +38,31 @@ export default async function handler(req, res) {
   const text = message.text.trim();
 
   try {
-    if (text.toLowerCase() === "идеи") {
-      await handlePlan(chatId);
-    } else if (text.toLowerCase().startsWith("ответ:")) {
-      await handleReply(chatId, text.slice(6).trim());
-    } else if (text.toLowerCase() === "отчёт" || text.toLowerCase() === "отчет") {
+    if (text === "/start") {
+      await sendTelegramMessage(
+        chatId,
+        "Привет! Я твой аналитик и контент-стратег для X.\n\n" + HELP_TEXT
+      );
+    } else if (text === "❓ Помощь") {
+      await sendTelegramMessage(chatId, HELP_TEXT);
+    } else if (text === "📊 Отчёт") {
       await handleAnalyze(chatId);
+    } else if (text === "💡 Идеи") {
+      await handlePlan(chatId);
+    } else if (text === "✍️ Ответ на твит") {
+      await setPendingAction(chatId, "awaiting_tweet");
+      await sendTelegramMessage(chatId, "Скинь текст твита, на который нужно ответить.");
     } else {
-      await handleIngest(chatId, text);
+      // Проверяем, не ждём ли мы от этого чата что-то конкретное
+      const pending = await getPendingAction(chatId);
+
+      if (pending === "awaiting_tweet") {
+        await setPendingAction(chatId, null);
+        await handleReply(chatId, text);
+      } else {
+        // Обычное сообщение — считаем, что это данные поста
+        await handleIngest(chatId, text);
+      }
     }
   } catch (err) {
     console.error(err);
@@ -52,33 +82,33 @@ async function handleIngest(chatId, text) {
   try {
     parsed = JSON.parse(raw);
   } catch {
-    await sendTelegramMessage(chatId, "Не смогла разобрать сообщение. Напиши, пожалуйста, ещё раз с датой, временем и метриками.");
-    return;
-  }
-
-  if (parsed.missing_fields?.length) {
     await sendTelegramMessage(
       chatId,
-      `Не хватает: ${parsed.missing_fields.join(", ")}. Дошли, пожалуйста.`
+      "Не смогла разобрать сообщение как данные поста. Если хотела что-то другое — используй кнопки внизу."
     );
     return;
   }
 
+  if (parsed.missing_fields?.length) {
+    await sendTelegramMessage(chatId, `Не хватает: ${parsed.missing_fields.join(", ")}. Дошли, пожалуйста.`);
+    return;
+  }
+
   await savePost(parsed);
+  const er = ((parsed.likes + parsed.replies + parsed.retweets) / (parsed.views || 1)) * 100;
   await sendTelegramMessage(
     chatId,
-    `Записала: ${parsed.date} ${parsed.time}, тема "${parsed.topic}", ${parsed.views} просмотров, ER ${(
-      ((parsed.likes + parsed.replies + parsed.retweets) / (parsed.views || 1)) * 100
-    ).toFixed(1)}%`
+    `✅ Записала: ${parsed.date} ${parsed.time}, тема "${parsed.topic}", ${parsed.views} просмотров, ER ${er.toFixed(1)}%`
   );
 }
 
 async function handleAnalyze(chatId) {
   const posts = await getAllPosts();
   if (posts.length === 0) {
-    await sendTelegramMessage(chatId, "Пока нет ни одного поста в базе. Скинь данные — начнём собирать.");
+    await sendTelegramMessage(chatId, "Пока нет ни одного поста в базе. Пришли данные — начнём собирать.");
     return;
   }
+  await sendTelegramMessage(chatId, "Считаю отчёт, секунду...");
   const report = await askClaude({
     system: SYSTEM_PROMPT,
     userMessage: `task: analyze\n\n${JSON.stringify(posts)}`,
