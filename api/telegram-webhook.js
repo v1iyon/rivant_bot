@@ -1,7 +1,9 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { askClaude } from "../lib/claude.js";
-import { sendTelegramMessage, MAIN_MENU } from "../lib/telegram.js";
+import { sendTelegramMessage, sendTelegramPhoto, MAIN_MENU } from "../lib/telegram.js";
+import { computeStats } from "../lib/analytics.js";
+import { barChart } from "../lib/charts.js";
 import {
   savePost,
   getAllPosts,
@@ -295,19 +297,28 @@ async function handleAnalyze(chatId) {
     return;
   }
   await sendTelegramMessage(chatId, "Считаю отчёт, секунду...");
+  const stats = computeStats(posts);
   const report = await askClaude({
     system: SYSTEM_PROMPT,
-    userMessage: `task: analyze\n\n${JSON.stringify(posts)}`,
+    userMessage: `task: analyze\n\n${JSON.stringify(stats)}`,
     maxTokens: 2000,
   });
-  await sendTelegramMessage(chatId, report);
+  await sendTelegramMessage(chatId, `Постов в базе: ${stats.totalPosts}\n\n${report}`);
+
+  if (stats.byHour.length > 1) {
+    await sendTelegramPhoto(chatId, barChart(stats.byHour, "ER по часам публикации"), "ER (%) по часам");
+  }
+  if (stats.byWeekday.length > 1) {
+    await sendTelegramPhoto(chatId, barChart(stats.byWeekday, "ER по дням недели"), "ER (%) по дням недели");
+  }
 }
 
 async function handlePlan(chatId) {
   const posts = await getAllPosts();
+  const stats = computeStats(posts);
   const ideasRaw = await askClaude({
     system: SYSTEM_PROMPT,
-    userMessage: `task: plan\n\nposts: ${JSON.stringify(posts)}`,
+    userMessage: `task: plan\n\n${JSON.stringify(stats)}`,
     maxTokens: 1500,
   });
 
