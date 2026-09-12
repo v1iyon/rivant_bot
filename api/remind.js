@@ -34,8 +34,13 @@ export default async function handler(req, res) {
   });
 
   const tweetMatch = raw.match(/TWEET:\s*([\s\S]*?)\nWHY:\s*([\s\S]*)/);
+  const extras = [];
+  if (idea.include_media) extras.push("📷 Прикрепи фото или видео к этому посту");
+  if (idea.include_poll) extras.push("📊 Сделай это опросом (poll), не обычным текстом");
+  const extrasText = extras.length ? `\n\n${extras.join("\n")}` : "";
+
   const draft = tweetMatch
-    ? `⏰ Пора постить\n\n${tweetMatch[2].trim()}\n\n📝 Черновик (EN):\n${tweetMatch[1].trim()}`
+    ? `⏰ Пора постить\n\n${tweetMatch[2].trim()}\n\n📝 Черновик (EN):\n${tweetMatch[1].trim()}${extrasText}`
     : raw; // на всякий случай, если формат не распознался
 
   await sendTelegramMessage(process.env.FOUNDER_CHAT_ID, draft);

@@ -42,6 +42,12 @@ export default async function handler(req, res) {
   if (stats.byTopic.length > 1) {
     await sendTelegramPhoto(chatId, barChart(stats.byTopic, "ER по темам"), "ER (%) по темам постов");
   }
+  if (stats.byMedia.length > 1) {
+    await sendTelegramPhoto(chatId, barChart(stats.byMedia, "ER: фото/видео vs без"), "ER (%) с медиа и без");
+  }
+  if (stats.byPoll.length > 1) {
+    await sendTelegramPhoto(chatId, barChart(stats.byPoll, "ER: опрос vs без"), "ER (%) с опросом и без");
+  }
 
   // 3. План на неделю — пополняет очередь, бот сам будет присылать по расписанию
   const ideasRaw = await askClaude({

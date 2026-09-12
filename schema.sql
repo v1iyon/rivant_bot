@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS posts (
   retweets INTEGER DEFAULT 0,
   clicks INTEGER DEFAULT 0,
   had_link INTEGER DEFAULT 0,    -- 0/1
+  had_media INTEGER DEFAULT 0,   -- 0/1 — было фото или видео
+  had_poll INTEGER DEFAULT 0,    -- 0/1 — был опрос
   engagement_rate REAL,
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -22,6 +24,8 @@ CREATE TABLE IF NOT EXISTS content_queue (
   format TEXT,
   suggested_slot TEXT,           -- e.g. '15:00'
   day_of_week TEXT,               -- 'Mon'..'Sun'
+  include_media INTEGER DEFAULT 0,
+  include_poll INTEGER DEFAULT 0,
   reasoning TEXT,
   status TEXT DEFAULT 'queued',  -- queued / sent / used / skipped
   created_at TEXT DEFAULT (datetime('now'))

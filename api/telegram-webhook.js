@@ -199,6 +199,26 @@ async function handlePostWizardStep(chatId, step, text) {
     draft.had_link = t === "да";
     draft.format = draft.had_link ? "text_link" : (draft.text.trim().endsWith("?") ? "question" : "text");
     await setDraft(chatId, draft);
+    await setPendingAction(chatId, "newpost:media");
+    await sendTelegramMessage(chatId, "Было фото или видео в посте?", { keyboard: YES_NO_KEYBOARD });
+  } else if (step === "newpost:media") {
+    const t = text.trim().toLowerCase();
+    if (t !== "да" && t !== "нет") {
+      await sendTelegramMessage(chatId, "Ответь Да или Нет.", { keyboard: YES_NO_KEYBOARD });
+      return;
+    }
+    draft.had_media = t === "да";
+    await setDraft(chatId, draft);
+    await setPendingAction(chatId, "newpost:poll");
+    await sendTelegramMessage(chatId, "Был опрос (poll) в посте?", { keyboard: YES_NO_KEYBOARD });
+  } else if (step === "newpost:poll") {
+    const t = text.trim().toLowerCase();
+    if (t !== "да" && t !== "нет") {
+      await sendTelegramMessage(chatId, "Ответь Да или Нет.", { keyboard: YES_NO_KEYBOARD });
+      return;
+    }
+    draft.had_poll = t === "да";
+    await setDraft(chatId, draft);
     await setPendingAction(chatId, "newpost:views");
     await sendTelegramMessage(chatId, "Сколько просмотров?", { keyboard: undefined });
   } else if (step === "newpost:views") {

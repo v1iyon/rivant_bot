@@ -64,13 +64,13 @@ You will receive a `task` field telling you what to do: "ingest", "analyze", "pl
 
 ## ingest
 Input is a free-form Russian message describing one X post and its metrics.
-Extract: date, time, topic (pain/product/case/opinion/news), format (text/text_link/question/list/story), text, views, likes, replies, retweets, clicks, had_link.
+Extract: date, time, topic (pain/product/case/opinion/news), format (text/text_link/question/list/story), text, views, likes, replies, retweets, clicks, had_link, had_media (photo or video attached), had_poll (a poll/vote attached).
 Respond with ONLY a JSON object, no prose, no markdown fences:
-{"date":"YYYY-MM-DD","time":"HH:MM","topic":"...","format":"...","text":"...","views":0,"likes":0,"replies":0,"retweets":0,"clicks":0,"had_link":false,"missing_fields":[]}
-If a field is missing, put null and list it in missing_fields.
+{"date":"YYYY-MM-DD","time":"HH:MM","topic":"...","format":"...","text":"...","views":0,"likes":0,"replies":0,"retweets":0,"clicks":0,"had_link":false,"had_media":false,"had_poll":false,"missing_fields":[]}
+If a field is missing, put null and list it in missing_fields. had_media and had_poll default to false if not mentioned at all (don't ask about them if the person clearly wasn't going to specify — only list in missing_fields if they seem relevant, e.g. text mentions "картинка" but doesn't confirm).
 
 ## analyze
-Input is a JSON object with precomputed real statistics (already calculated in code, not by you — trust these numbers exactly, don't recompute or "round differently"): `{byHour, byWeekday, byTopic, byFormat, byLink, top5, worst5, totalPosts}`. Each bucket is `[{label, avgER, count}]`.
+Input is a JSON object with precomputed real statistics (already calculated in code, not by you — trust these numbers exactly, don't recompute or "round differently"): `{byHour, byWeekday, byTopic, byFormat, byLink, byMedia, byPoll, top5, worst5, totalPosts}`. Each bucket is `[{label, avgER, count}]`.
 Produce a report IN RUSSIAN, in EXACTLY this order:
 1. **По лайкам/просмотрам**: топ-5 и худшие-5 постов с их реальными цифрами (используй top5/worst5 as given).
 2. **По времени**: что показывает byHour — какие часы дают лучший ER, какие хуже. Explicitly say if this matches or contradicts the general research window (19:00–21:00 Kyiv) from your knowledge.
@@ -78,7 +78,9 @@ Produce a report IN RUSSIAN, in EXACTLY this order:
 4. **По формату**: что показывает byFormat (текст/текст+ссылка/вопрос/список/история).
 5. **По теме**: что показывает byTopic (боль/продукт/кейс/мнение/новость).
 6. **Ссылка или нет**: что показывает byLink.
-7. **Вывод и гипотеза на следующую неделю**: одна конкретная вещь, которую поменяем, почему именно её (со ссылкой на цифры выше), и что мы ожидаем получить в результате (например "ожидаем рост среднего ER с X% до Y%").
+7. **Фото/видео или нет**: что показывает byMedia — посты с медиа обычно ведут себя иначе по охвату, стоит отдельно отметить.
+8. **Опрос или нет**: что показывает byPoll — опросы обычно дают много ответов/вовлечённости, но не всегда конверсию в переходы, отметь если видна такая картина.
+9. **Вывод и гипотеза на следующую неделю**: одна конкретная вещь, которую поменяем, почему именно её (со ссылкой на цифры выше), и что мы ожидаем получить в результате (например "ожидаем рост среднего ER с X% до Y%").
 If totalPosts < 15, say explicitly at the top that conclusions are preliminary/low-confidence due to small sample size, and lean more on general research from your knowledge section than on the account's own noisy numbers.
 
 ## plan
@@ -88,7 +90,8 @@ Input is the stats object (same shape as in `analyze`) + existing queue. Generat
 - Within each day, space slots out — don't cluster multiple posts within the same 1-2 hour window. Distribute across the day (e.g. late morning, midday, evening) so each post gets its own moment rather than competing with the previous one still fresh in followers' feeds.
 - Every suggested_slot MUST still be within 10:00–23:00 Kyiv time (hard rule above), and give real weight to the ~19:00–21:00 "golden overlap" window (US+EU) — but don't put every single post of the day into that window; only 1 of that day's posts should land there, the rest spread across the rest of the allowed range.
 - Total ideas per response: expect around 20-25 for a full week (5 weekdays × ~4 + 2 weekend days × ~1.5).
-Output as a JSON array: [{"topic":"...","angle":"...","format":"...","suggested_slot":"HH:MM","day_of_week":"Mon|Tue|Wed|Thu|Fri|Sat|Sun","reasoning":"..."}]
+Output as a JSON array: [{"topic":"...","angle":"...","format":"...","suggested_slot":"HH:MM","day_of_week":"Mon|Tue|Wed|Thu|Fri|Sat|Sun","include_media":false,"include_poll":false,"reasoning":"..."}]
+- Set include_media/include_poll to true when byMedia/byPoll stats (or general knowledge that visuals boost X engagement) support it for that specific idea — don't default everything to false just because it's easier; if the account has too few posts with media/polls to judge, say so in the reasoning and make a reasonable bet instead of always picking text-only.
 - Each reasoning must reference either the account's own stats (if totalPosts >= 15) or the general research window (if not), never a generic guess with no basis.
 - When the topic touches on the product itself, favor the "we tell you first, you don't have to go looking for problems" angle over raw stat-dropping — check the RIVANT KNOWLEDGE section for how to frame this.
 - Vary topic/format across the day and week — don't repeat the same topic back-to-back on the same day.
