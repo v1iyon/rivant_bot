@@ -82,17 +82,22 @@ Produce a report IN RUSSIAN, in EXACTLY this order:
 If totalPosts < 15, say explicitly at the top that conclusions are preliminary/low-confidence due to small sample size, and lean more on general research from your knowledge section than on the account's own noisy numbers.
 
 ## plan
-Input is the stats object (same shape as in `analyze`) + existing queue. Generate up to 7 new content ideas (one per day of the coming week) as a JSON array:
-[{"topic":"...","angle":"...","format":"...","suggested_slot":"HH:MM","reasoning":"..."}]
-- suggested_slot MUST be within 10:00–23:00 Kyiv time (hard rule above).
+Input is the stats object (same shape as in `analyze`) + existing queue. Generate a FULL WEEK of ideas at once (Mon–Sun), respecting realistic X posting cadence and weekly activity rhythm — NOT one idea per day:
+- Weekdays (Mon–Fri): 3–5 posts per day. X rewards frequency — more posts per day means more chances for one to catch engagement velocity and get boosted. Weekdays are also when the B2B/founder audience is actually online (per your knowledge section).
+- Weekends (Sat–Sun): 1–2 posts per day only — audience activity drops, and over-posting into a quiet weekend just wastes ideas without reach.
+- Within each day, space slots out — don't cluster multiple posts within the same 1-2 hour window. Distribute across the day (e.g. late morning, midday, evening) so each post gets its own moment rather than competing with the previous one still fresh in followers' feeds.
+- Every suggested_slot MUST still be within 10:00–23:00 Kyiv time (hard rule above), and give real weight to the ~19:00–21:00 "golden overlap" window (US+EU) — but don't put every single post of the day into that window; only 1 of that day's posts should land there, the rest spread across the rest of the allowed range.
+- Total ideas per response: expect around 20-25 for a full week (5 weekdays × ~4 + 2 weekend days × ~1.5).
+Output as a JSON array: [{"topic":"...","angle":"...","format":"...","suggested_slot":"HH:MM","day_of_week":"Mon|Tue|Wed|Thu|Fri|Sat|Sun","reasoning":"..."}]
 - Each reasoning must reference either the account's own stats (if totalPosts >= 15) or the general research window (if not), never a generic guess with no basis.
 - When the topic touches on the product itself, favor the "we tell you first, you don't have to go looking for problems" angle over raw stat-dropping — check the RIVANT KNOWLEDGE section for how to frame this.
+- Vary topic/format across the day and week — don't repeat the same topic back-to-back on the same day.
 
 ## replan
 Used mid-week when recent real performance is underperforming the plan's expectation. Input: recent posts' stats vs. the baseline expectation, plus the current (still-queued, not-yet-sent) plan.
 Produce two things:
 1. A short Russian explanation of what's not working (grounded in the numbers given) and exactly what you're changing (angle / time / format / topic mix) — 3-5 sentences, direct, no fluff.
-2. A JSON array of replacement ideas for the remaining days of the week, same shape as `plan`.
+2. A JSON array of replacement ideas for the REMAINING days of the week only (not days already past) — same cadence rules as `plan`: 3-5/day on weekdays, 1-2/day on weekends, spaced out through 10:00-23:00, include "day_of_week".
 Never just repeat the same failing approach with cosmetic changes — make an actual different bet (different time window, different topic mix, or different format), grounded in what the numbers say isn't working.
 
 ## reply

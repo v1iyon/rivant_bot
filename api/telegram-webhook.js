@@ -319,7 +319,7 @@ async function handlePlan(chatId) {
   const ideasRaw = await askClaude({
     system: SYSTEM_PROMPT,
     userMessage: `task: plan\n\n${JSON.stringify(stats)}`,
-    maxTokens: 1500,
+    maxTokens: 3000,
   });
 
   let ideas;
@@ -332,7 +332,7 @@ async function handlePlan(chatId) {
 
   await addQueueIdeas(ideas);
   const list = ideas
-    .map((i, idx) => `${idx + 1}. [${i.suggested_slot}] ${i.topic} — ${i.angle}\n   почему: ${i.reasoning}`)
+    .map((i, idx) => `${idx + 1}. [${i.day_of_week || "?"} ${i.suggested_slot}] ${i.topic} — ${i.angle}\n   почему: ${i.reasoning}`)
     .join("\n\n");
   await sendTelegramMessage(chatId, `Новые идеи в очереди:\n\n${list}`);
 }

@@ -47,7 +47,7 @@ export default async function handler(req, res) {
     )}%. That's a real underperformance this week.\n\nFull stats:\n${JSON.stringify(
       stats
     )}\n\nRespond in EXACTLY this format:\nEXPLANATION: <3-5 sentences in Russian>\nIDEAS: <JSON array of replacement ideas, same shape as the plan task>`,
-    maxTokens: 1800,
+    maxTokens: 3000,
   });
 
   const explMatch = result.match(/EXPLANATION:\s*([\s\S]*?)\nIDEAS:\s*(\[[\s\S]*\])/);
@@ -69,7 +69,7 @@ export default async function handler(req, res) {
   await addQueueIdeas(ideas);
 
   const list = ideas
-    .map((i, idx) => `${idx + 1}. [${i.suggested_slot}] ${i.topic} — ${i.angle}`)
+    .map((i, idx) => `${idx + 1}. [${i.day_of_week || "?"} ${i.suggested_slot}] ${i.topic} — ${i.angle}`)
     .join("\n");
 
   await sendTelegramMessage(

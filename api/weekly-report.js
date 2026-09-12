@@ -47,14 +47,14 @@ export default async function handler(req, res) {
   const ideasRaw = await askClaude({
     system: SYSTEM_PROMPT,
     userMessage: `task: plan\n\n${JSON.stringify(stats)}`,
-    maxTokens: 1500,
+    maxTokens: 3000,
   });
 
   try {
     const ideas = JSON.parse(ideasRaw);
     await addQueueIdeas(ideas);
     const list = ideas
-      .map((i, idx) => `${idx + 1}. [${i.suggested_slot}] ${i.topic} — ${i.angle}`)
+      .map((i, idx) => `${idx + 1}. [${i.day_of_week || "?"} ${i.suggested_slot}] ${i.topic} — ${i.angle}`)
       .join("\n");
     await sendTelegramMessage(
       chatId,

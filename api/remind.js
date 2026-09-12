@@ -15,13 +15,15 @@ export default async function handler(req, res) {
   }
 
   const offsetHours = Number(process.env.LOCAL_UTC_OFFSET || 0);
-  const currentHourUTC = new Date().getUTCHours();
-  const currentLocalHour = (currentHourUTC + offsetHours + 24) % 24;
-  const idea = await getIdeaForHour(currentLocalHour);
+  const now = new Date(Date.now() + offsetHours * 3600 * 1000);
+  const currentLocalHour = now.getUTCHours();
+  const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const currentDayOfWeek = DAYS[now.getUTCDay()];
+  const idea = await getIdeaForHour(currentLocalHour, currentDayOfWeek);
 
   if (!idea) {
-    // Нет идеи именно на этот час — молчим, ничего не шлём
-    return res.status(200).send(`no idea matches local hour ${currentLocalHour}`);
+    // Нет идеи именно на этот час/день — молчим, ничего не шлём
+    return res.status(200).send(`no idea matches ${currentDayOfWeek} ${currentLocalHour}:00 local`);
   }
 
   const raw = await generateTweetUnder280({

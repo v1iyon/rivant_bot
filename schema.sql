@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS content_queue (
   angle TEXT,
   format TEXT,
   suggested_slot TEXT,           -- e.g. '15:00'
+  day_of_week TEXT,               -- 'Mon'..'Sun'
   reasoning TEXT,
   status TEXT DEFAULT 'queued',  -- queued / sent / used / skipped
   created_at TEXT DEFAULT (datetime('now'))
