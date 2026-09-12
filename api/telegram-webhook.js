@@ -12,6 +12,7 @@ import { computeStats } from "../lib/analytics.js";
 import { barChart } from "../lib/charts.js";
 import { sendReminderForIdea } from "../lib/reminder.js";
 import { hoursSincePost, todayLocal } from "../lib/time.js";
+import { extractJson } from "../lib/parse.js";
 import {
   savePost,
   getAllPosts,
@@ -315,7 +316,18 @@ async function handlePostWizardStep(chatId, step, text, messageAtMs) {
     draft.hours_since_post = hoursSince;
     draft.metrics_checked_at = new Date(messageAtMs).toISOString();
 
-    await savePost(draft);
+    try {
+      await savePost(draft);
+    } catch (err) {
+      if (err.code === "DUPLICATE_POST") {
+        // Не сбрасываем draft — человек может просто прислать новое время,
+        // не заполняя весь мастер заново с нуля.
+        await setPendingAction(chatId, "newpost:time");
+        await sendTelegramMessage(chatId, `${err.message}\n\nПришли другое время для этого же поста.`, { keyboard: undefined });
+        return;
+      }
+      throw err;
+    }
     const er = ((draft.likes + draft.replies + draft.retweets) / (draft.views || 1)) * 100;
     await clearFlow(chatId);
     const timingNote =
@@ -335,10 +347,8 @@ async function handleIngest(chatId, text, messageAtMs) {
     userMessage: `task: ingest\n\n${text}`,
   });
 
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
+  const parsed = extractJson(raw);
+  if (!parsed || typeof parsed !== "object") {
     await sendTelegramMessage(
       chatId,
       "Не смогла разобрать это как данные поста. Проще нажми «➕ Новый пост» — спрошу всё по шагам."
@@ -356,7 +366,15 @@ async function handleIngest(chatId, text, messageAtMs) {
   parsed.hours_since_post = hoursSince;
   parsed.metrics_checked_at = new Date(messageAtMs).toISOString();
 
-  await savePost(parsed);
+  try {
+    await savePost(parsed);
+  } catch (err) {
+    if (err.code === "DUPLICATE_POST") {
+      await sendTelegramMessage(chatId, err.message);
+      return;
+    }
+    throw err;
+  }
   const er = ((parsed.likes + parsed.replies + parsed.retweets) / (parsed.views || 1)) * 100;
   const timingNote = hoursSince !== null ? ` (замер через ~${hoursSince}ч после поста)` : "";
   await sendTelegramMessage(
@@ -397,10 +415,9 @@ async function handlePlan(chatId) {
     maxTokens: 3000,
   });
 
-  let ideas;
-  try {
-    ideas = JSON.parse(ideasRaw);
-  } catch {
+  const ideas = extractJson(ideasRaw);
+  if (!Array.isArray(ideas)) {
+    console.error("handlePlan: не смогла распознать JSON с идеями:", ideasRaw);
     await sendTelegramMessage(chatId, "Не получилось сгенерировать идеи, попробуй ещё раз через минуту.");
     return;
   }
@@ -479,10 +496,9 @@ async function handleIdeaCallback(callbackQuery) {
       maxTokens: 800,
     });
 
-    let newIdea;
-    try {
-      newIdea = JSON.parse(raw);
-    } catch {
+    const newIdea = extractJson(raw);
+    if (!newIdea || typeof newIdea !== "object") {
+      console.error("idea_other: не смогла распознать JSON с идеей:", raw);
       await sendTelegramMessage(chatId, "Не получилось придумать замену, попробуй ещё раз через минуту.");
       return;
     }

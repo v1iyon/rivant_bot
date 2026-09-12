@@ -20,6 +20,10 @@ CREATE TABLE IF NOT EXISTS posts (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Страховка на уровне БД: даже если проверка в коде почему-то не сработает,
+-- вставить два поста на одну дату+время не получится.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_posts_date_time ON posts(post_date, post_time);
+
 CREATE TABLE IF NOT EXISTS content_queue (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   topic TEXT,
