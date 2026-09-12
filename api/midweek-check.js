@@ -1,5 +1,5 @@
 import { getAllPosts, getRecentPosts, clearQueuedIdeas, addQueueIdeas } from "../lib/db.js";
-import { computeStats } from "../lib/analytics.js";
+import { computeStats, weightedOverallER } from "../lib/analytics.js";
 import { askClaude } from "../lib/claude.js";
 import { sendTelegramMessage } from "../lib/telegram.js";
 import { readFileSync } from "fs";
@@ -10,8 +10,9 @@ const SYSTEM_PROMPT = readFileSync(
   "utf-8"
 );
 
-const RECENT_COUNT = 3; // сколько последних постов считаем "текущей формой"
+const RECENT_COUNT = 5; // сколько последних постов считаем "текущей формой" (было 3 — слишком шумно)
 const UNDERPERFORM_THRESHOLD = 0.7; // если свежие посты дают <70% от обычного ER — бьём тревогу
+const MIN_TOTAL_POSTS = 15; // до этого объёма любое сравнение "просадки" — шум, а не сигнал
 
 export default async function handler(req, res) {
   if (req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
@@ -19,7 +20,7 @@ export default async function handler(req, res) {
   }
 
   const allPosts = await getAllPosts();
-  if (allPosts.length < RECENT_COUNT + 5) {
+  if (allPosts.length < Math.max(RECENT_COUNT + 5, MIN_TOTAL_POSTS)) {
     // Слишком мало данных, чтобы делать выводы о "просадке" — не дёргаем план зря
     return res.status(200).send("not enough data for midweek check yet");
   }
@@ -28,8 +29,10 @@ export default async function handler(req, res) {
   const recentAvgER =
     recent.reduce((sum, p) => sum + (p.engagement_rate || 0), 0) / recent.length;
 
-  const overallAvgER =
-    allPosts.reduce((sum, p) => sum + (p.engagement_rate || 0), 0) / allPosts.length;
+  // Сравниваем не с "сырым" средним за всю историю (где посты полугодовой
+  // давности тянут наравне со вчерашними), а со взвешенным по свежести —
+  // иначе легко принять естественный дрейф стиля/аудитории за "просадку".
+  const overallAvgER = weightedOverallER(allPosts);
 
   if (overallAvgER === 0 || recentAvgER >= overallAvgER * UNDERPERFORM_THRESHOLD) {
     // Всё в порядке, план не проваливается — ничего не делаем и не пишем

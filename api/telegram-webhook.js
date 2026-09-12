@@ -1,13 +1,24 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { askClaude } from "../lib/claude.js";
-import { sendTelegramMessage, sendTelegramPhoto, MAIN_MENU } from "../lib/telegram.js";
+import {
+  sendTelegramMessage,
+  sendTelegramPhoto,
+  answerCallbackQuery,
+  clearInlineButtons,
+  MAIN_MENU,
+} from "../lib/telegram.js";
 import { computeStats } from "../lib/analytics.js";
 import { barChart } from "../lib/charts.js";
+import { sendReminderForIdea } from "../lib/reminder.js";
+import { hoursSincePost, todayLocal } from "../lib/time.js";
 import {
   savePost,
   getAllPosts,
   addQueueIdeas,
+  addSingleQueueIdea,
+  getQueueIdeaById,
+  setIdeaStatus,
   getPendingAction,
   setPendingAction,
   getDraft,
@@ -27,7 +38,12 @@ const HELP_TEXT = `Вот что я умею:
 ➕ *Новый пост* — запишу пост в базу, спрошу всё по шагам
 ✍️ *Ответ на твит* — черновик ответа клиенту
 
-В любой момент шаговых вопросов можно нажать другую кнопку меню — текущий ввод отменится.`;
+В любой момент шаговых вопросов можно нажать другую кнопку меню — текущий ввод отменится.
+
+Под каждым напоминанием "⏰ Пора постить" есть кнопки:
+✅ *Запостила* — сразу перейдём к записи реального поста
+⏭ *Пропустить* — идея не потеряна, просто помечается пропущенной
+🔁 *Дай другую идею* — предложу другой угол на этот же слот`;
 
 const TOPIC_KEYBOARD = {
   keyboard: [
@@ -99,6 +115,17 @@ export default async function handler(req, res) {
   }
 
   const update = req.body;
+
+  // Нажатие инлайн-кнопки под напоминанием ("Запостила" / "Пропустить" / "Другую идею")
+  if (update?.callback_query) {
+    try {
+      await handleIdeaCallback(update.callback_query);
+    } catch (err) {
+      console.error(err);
+    }
+    return res.status(200).send("ok");
+  }
+
   const message = update?.message;
   if (!message || !message.text) {
     return res.status(200).send("ok");
@@ -106,6 +133,9 @@ export default async function handler(req, res) {
 
   const chatId = message.chat.id;
   const text = message.text.trim();
+  // Момент, когда человек фактически отправил это сообщение — используем как
+  // "когда смотрели статистику" при записи поста, без лишнего вопроса боту.
+  const messageAtMs = message.date ? message.date * 1000 : Date.now();
 
   const MENU_BUTTONS = ["📊 Отчёт", "💡 Идеи", "➕ Новый пост", "✍️ Ответ на твит", "❓ Помощь"];
 
@@ -137,10 +167,10 @@ export default async function handler(req, res) {
         await clearFlow(chatId);
         await handleReply(chatId, text);
       } else if (pending && pending.startsWith("newpost:")) {
-        await handlePostWizardStep(chatId, pending, text);
+        await handlePostWizardStep(chatId, pending, text, messageAtMs);
       } else {
         // Никакого мастера не идёт — по умолчанию считаем это старым способом (весь пост одним сообщением)
-        await handleIngest(chatId, text);
+        await handleIngest(chatId, text, messageAtMs);
       }
     }
   } catch (err) {
@@ -152,7 +182,7 @@ export default async function handler(req, res) {
   res.status(200).send("ok");
 }
 
-async function handlePostWizardStep(chatId, step, text) {
+async function handlePostWizardStep(chatId, step, text, messageAtMs) {
   const draft = await getDraft(chatId);
 
   if (step === "newpost:date") {
@@ -174,12 +204,21 @@ async function handlePostWizardStep(chatId, step, text) {
     draft.time = time;
     await setDraft(chatId, draft);
     await setPendingAction(chatId, "newpost:text");
-    await sendTelegramMessage(chatId, "О чём пост? Кратко перескажи мысль.");
+    await sendTelegramMessage(chatId, "Скинь точный текст поста, как он опубликован (не пересказ) — это нужно для качественного анализа, что именно сработало.");
   } else if (step === "newpost:text") {
+    // Просим ИМЕННО опубликованный текст, не пересказ — качественный анализ
+    // (хук, структура, CTA) возможен только по реальному тексту поста.
     draft.text = text;
     await setDraft(chatId, draft);
-    await setPendingAction(chatId, "newpost:topic");
-    await sendTelegramMessage(chatId, "Какая это категория?", { keyboard: TOPIC_KEYBOARD });
+    if (draft.topic && draft.format) {
+      // Идея пришла из "✅ Запостила" под напоминанием — тема/формат уже
+      // известны из плана, не переспрашиваем их заново.
+      await setPendingAction(chatId, "newpost:views");
+      await sendTelegramMessage(chatId, "Сколько просмотров?", { keyboard: undefined });
+    } else {
+      await setPendingAction(chatId, "newpost:topic");
+      await sendTelegramMessage(chatId, "Какая это категория?", { keyboard: TOPIC_KEYBOARD });
+    }
   } else if (step === "newpost:topic") {
     const topic = TOPIC_MAP[text.trim().toLowerCase()];
     if (!topic) {
@@ -269,18 +308,28 @@ async function handlePostWizardStep(chatId, step, text) {
     }
     draft.clicks = n;
 
-    // Финал — сохраняем
+    // Финал — сохраняем. hours_since_post считаем автоматически по моменту
+    // отправки ЭТОГО сообщения (messageAtMs) относительно даты+времени поста —
+    // без лишнего вопроса "через сколько часов ты смотришь статистику".
+    const hoursSince = hoursSincePost(draft.date, draft.time, messageAtMs);
+    draft.hours_since_post = hoursSince;
+    draft.metrics_checked_at = new Date(messageAtMs).toISOString();
+
     await savePost(draft);
     const er = ((draft.likes + draft.replies + draft.retweets) / (draft.views || 1)) * 100;
     await clearFlow(chatId);
+    const timingNote =
+      hoursSince !== null
+        ? ` (замер через ~${hoursSince}ч после поста)`
+        : "";
     await sendTelegramMessage(
       chatId,
-      `✅ Записала: ${draft.date} ${draft.time}, тема "${draft.topic}", ${draft.views} просмотров, ER ${er.toFixed(1)}%`
+      `✅ Записала: ${draft.date} ${draft.time}, тема "${draft.topic}", ${draft.views} просмотров, ER ${er.toFixed(1)}%${timingNote}`
     );
   }
 }
 
-async function handleIngest(chatId, text) {
+async function handleIngest(chatId, text, messageAtMs) {
   const raw = await askClaude({
     system: SYSTEM_PROMPT,
     userMessage: `task: ingest\n\n${text}`,
@@ -302,11 +351,17 @@ async function handleIngest(chatId, text) {
     return;
   }
 
+  // Момент отправки этого сообщения = момент, когда смотрели статистику.
+  const hoursSince = hoursSincePost(parsed.date, parsed.time, messageAtMs);
+  parsed.hours_since_post = hoursSince;
+  parsed.metrics_checked_at = new Date(messageAtMs).toISOString();
+
   await savePost(parsed);
   const er = ((parsed.likes + parsed.replies + parsed.retweets) / (parsed.views || 1)) * 100;
+  const timingNote = hoursSince !== null ? ` (замер через ~${hoursSince}ч после поста)` : "";
   await sendTelegramMessage(
     chatId,
-    `✅ Записала: ${parsed.date} ${parsed.time}, тема "${parsed.topic}", ${parsed.views} просмотров, ER ${er.toFixed(1)}%`
+    `✅ Записала: ${parsed.date} ${parsed.time}, тема "${parsed.topic}", ${parsed.views} просмотров, ER ${er.toFixed(1)}%${timingNote}`
   );
 }
 
@@ -364,4 +419,77 @@ async function handleReply(chatId, tweetText) {
     maxTokens: 800,
   });
   await sendTelegramMessage(chatId, result);
+}
+
+// Обрабатывает нажатие одной из трёх кнопок под напоминанием "⏰ Пора постить":
+// idea_posted:<id> / idea_skip:<id> / idea_other:<id>
+async function handleIdeaCallback(callbackQuery) {
+  const chatId = callbackQuery.message.chat.id;
+  const messageId = callbackQuery.message.message_id;
+  const [action, idStr] = (callbackQuery.data || "").split(":");
+  const ideaId = Number(idStr);
+
+  const idea = await getQueueIdeaById(ideaId);
+  if (!idea) {
+    await answerCallbackQuery(callbackQuery.id, "Эта идея уже неактуальна");
+    await clearInlineButtons(chatId, messageId);
+    return;
+  }
+
+  if (action === "idea_posted") {
+    await setIdeaStatus(ideaId, "sent");
+    await clearInlineButtons(chatId, messageId);
+    await answerCallbackQuery(callbackQuery.id, "Записываю пост");
+    // Тема/формат/дата/время уже известны из плана — сразу просим сам текст,
+    // не переспрашивая то, что бот уже знает.
+    await setDraft(chatId, {
+      date: todayLocal(),
+      time: idea.suggested_slot,
+      topic: idea.topic,
+      format: idea.format,
+    });
+    await setPendingAction(chatId, "newpost:text");
+    await sendTelegramMessage(
+      chatId,
+      "Отлично! Скинь точный текст поста, как он опубликован — это нужно для качественного анализа.",
+      { keyboard: undefined }
+    );
+  } else if (action === "idea_skip") {
+    await setIdeaStatus(ideaId, "skipped");
+    await clearInlineButtons(chatId, messageId);
+    await answerCallbackQuery(callbackQuery.id, "Пропущено");
+    await sendTelegramMessage(chatId, "Ок, пропускаю. Идея не сгорела молча — учту при следующем анализе, если пропуски повторяются по одной теме или формату.");
+  } else if (action === "idea_other") {
+    await setIdeaStatus(ideaId, "skipped");
+    await clearInlineButtons(chatId, messageId);
+    await answerCallbackQuery(callbackQuery.id, "Ищу другой угол...");
+
+    const posts = await getAllPosts();
+    const stats = computeStats(posts);
+    const raw = await askClaude({
+      system: SYSTEM_PROMPT,
+      userMessage: `task: replan-slot\n\nSkipped idea: ${JSON.stringify({
+        topic: idea.topic,
+        angle: idea.angle,
+        format: idea.format,
+        suggested_slot: idea.suggested_slot,
+        day_of_week: idea.day_of_week,
+        reasoning: idea.reasoning,
+      })}\n\nStats:\n${JSON.stringify(stats)}`,
+      maxTokens: 800,
+    });
+
+    let newIdea;
+    try {
+      newIdea = JSON.parse(raw);
+    } catch {
+      await sendTelegramMessage(chatId, "Не получилось придумать замену, попробуй ещё раз через минуту.");
+      return;
+    }
+
+    const newId = await addSingleQueueIdea(newIdea);
+    const fullIdea = await getQueueIdeaById(newId);
+    await sendTelegramMessage(chatId, `💡 Другой угол на тот же слот:\n${newIdea.topic} — ${newIdea.angle}\nпочему: ${newIdea.reasoning}`);
+    await sendReminderForIdea(fullIdea, chatId);
+  }
 }

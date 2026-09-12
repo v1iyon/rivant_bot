@@ -40,6 +40,7 @@ git push -u origin main
    - `ANTHROPIC_API_KEY`
    - `CRON_SECRET` — ещё одна случайная строка (для защиты крон-эндпоинтов)
    - `FOUNDER_CHAT_ID` — твой личный chat_id в Telegram (см. шаг 6)
+   - `TIMEZONE` — твоя таймзона в формате IANA, например `Europe/Kyiv` (необязательно, это значение по умолчанию). Переход на летнее/зимнее время учитывается автоматически, руками менять не нужно.
 3. Deploy.
 
 ## Шаг 6. Узнай свой chat_id
@@ -56,12 +57,19 @@ npm install
 node scripts/init-db.js
 ```
 
-## Шаг 8. Подключи Telegram webhook к твоему Vercel-проекту
-Открой в браузере (подставь свой домен и секреты):
+Если у тебя **уже есть база с постами** (обновляешь бота, а не ставишь с нуля) — дополнительно запусти разовую миграцию, она добавит новые колонки и не тронет уже собранные данные:
 ```
-https://api.telegram.org/bot8420748322:AAG8DuMRj0RwkQ4WVgJrclgEthZunRqJxyI/setWebhook?url=https://rivant-bot-ichy.vercel.app/api/telegram-webhook&secret_token=3bfb4c7e1ec0888d47582f24ffeb7774
+node scripts/migrate-v2.js
+```
+
+## Шаг 8. Подключи Telegram webhook к твоему Vercel-проекту
+Открой в браузере (подставь СВОЙ домен и СВОИ секреты — не чужие из примера):
+```
+https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<твой-проект>.vercel.app/api/telegram-webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>
 ```
 Должно вернуть `{"ok":true,...}`.
+
+> ⚠️ Если у тебя в истории коммитов реальный `TELEGRAM_BOT_TOKEN` или `TELEGRAM_WEBHOOK_SECRET` (а не плейсхолдер) — это утечка секрета в публичный репозиторий. Токен бота стоит немедленно перевыпустить через @BotFather (`/revoke`), а `TELEGRAM_WEBHOOK_SECRET` сменить и обновить в Vercel и в setWebhook.
 
 ## Шаг 9. Настрой расписание на cron-job.org (бесплатно)
 Зарегистрируйся на https://cron-job.org и создай задания:
