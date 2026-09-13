@@ -25,6 +25,7 @@ import {
   getDraft,
   setDraft,
   clearFlow,
+  getQueuedIdeas,
 } from "../lib/db.js";
 
 const SYSTEM_PROMPT = readFileSync(
@@ -36,6 +37,7 @@ const HELP_TEXT = `Вот что я умею:
 
 📊 *Отчёт* — анализ всех твоих постов
 💡 *Идеи* — новые идеи постов на основе данных
+📋 *План* — покажу, что уже в очереди на публикацию
 ➕ *Новый пост* — запишу пост в базу, спрошу всё по шагам
 ✍️ *Ответ на твит* — черновик ответа клиенту
 
@@ -76,9 +78,11 @@ const RU_MONTHS = {
 
 function parseRuDate(text) {
   const t = text.trim().toLowerCase();
+
   // формат 10.09 или 10/09 или 2026-09-10
   let m = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+
   m = t.match(/^(\d{1,2})[.\/](\d{1,2})(?:[.\/](\d{4}))?$/);
   if (m) {
     const day = m[1].padStart(2, "0");
@@ -86,6 +90,7 @@ function parseRuDate(text) {
     const year = m[3] || "2026";
     return `${year}-${month}-${day}`;
   }
+
   // формат "10 сентября"
   m = t.match(/^(\d{1,2})\s+([а-я]+)/);
   if (m) {
@@ -94,6 +99,7 @@ function parseRuDate(text) {
     const monthKey = Object.keys(RU_MONTHS).find((k) => monthWord.startsWith(k));
     if (monthKey) return `2026-${RU_MONTHS[monthKey]}-${day}`;
   }
+
   return null;
 }
 
@@ -134,6 +140,7 @@ export default async function handler(req, res) {
 
   const chatId = message.chat.id;
   const text = message.text.trim();
+
   // Момент, когда человек фактически отправил это сообщение — используем как
   // "когда смотрели статистику" при записи поста, без лишнего вопроса боту.
   const messageAtMs = message.date ? message.date * 1000 : Date.now();
@@ -147,6 +154,7 @@ export default async function handler(req, res) {
     } else if (MENU_BUTTONS.includes(text)) {
       // Любая кнопка меню сбрасывает текущий мастер ввода
       await clearFlow(chatId);
+
       if (text === "❓ Помощь") {
         await sendTelegramMessage(chatId, HELP_TEXT);
       } else if (text === "📊 Отчёт") {
@@ -161,6 +169,11 @@ export default async function handler(req, res) {
         await setPendingAction(chatId, "awaiting_tweet");
         await sendTelegramMessage(chatId, "Скинь текст твита, на который нужно ответить.", { keyboard: undefined });
       }
+    } else if (text.trim().toLowerCase() === "план") {
+      // Отдельная команда: показывает то, что УЖЕ есть в очереди, без
+      // обращения к Claude — в отличие от handlePlan() (кнопка "Идеи").
+      await clearFlow(chatId);
+      await handleShowPlan(chatId);
     } else {
       const pending = await getPendingAction(chatId);
 
@@ -180,6 +193,7 @@ export default async function handler(req, res) {
 
     const msg = err.message || "";
     let userMessage;
+
     if (err.name === "AbortError" || /fetch failed|ECONNRESET|ETIMEDOUT/i.test(msg)) {
       // Claude API долго не отвечал (обе попытки, см. lib/claude.js) — не наша
       // проблема, но пользователю это должно звучать по-человечески.
@@ -190,6 +204,7 @@ export default async function handler(req, res) {
       // Неожиданная ошибка — оставляем как есть, это помогает при отладке.
       userMessage = `Ошибка: ${msg}`;
     }
+
     await sendTelegramMessage(chatId, userMessage);
   }
 
@@ -224,6 +239,7 @@ async function handlePostWizardStep(chatId, step, text, messageAtMs) {
     // (хук, структура, CTA) возможен только по реальному тексту поста.
     draft.text = text;
     await setDraft(chatId, draft);
+
     if (draft.topic && draft.format) {
       // Идея пришла из "✅ Запостила" под напоминанием — тема/формат уже
       // известны из плана, не переспрашиваем их заново.
@@ -341,12 +357,15 @@ async function handlePostWizardStep(chatId, step, text, messageAtMs) {
       }
       throw err;
     }
+
     const er = ((draft.likes + draft.replies + draft.retweets) / (draft.views || 1)) * 100;
     await clearFlow(chatId);
+
     const timingNote =
       hoursSince !== null
         ? ` (замер через ~${hoursSince}ч после поста)`
         : "";
+
     await sendTelegramMessage(
       chatId,
       `✅ Записала: ${draft.date} ${draft.time}, тема "${draft.topic}", ${draft.views} просмотров, ER ${er.toFixed(1)}%${timingNote}`
@@ -361,6 +380,7 @@ async function handleIngest(chatId, text, messageAtMs) {
   });
 
   const parsed = extractJson(raw);
+
   if (!parsed || typeof parsed !== "object") {
     await sendTelegramMessage(
       chatId,
@@ -388,8 +408,10 @@ async function handleIngest(chatId, text, messageAtMs) {
     }
     throw err;
   }
+
   const er = ((parsed.likes + parsed.replies + parsed.retweets) / (parsed.views || 1)) * 100;
   const timingNote = hoursSince !== null ? ` (замер через ~${hoursSince}ч после поста)` : "";
+
   await sendTelegramMessage(
     chatId,
     `✅ Записала: ${parsed.date} ${parsed.time}, тема "${parsed.topic}", ${parsed.views} просмотров, ER ${er.toFixed(1)}%${timingNote}`
@@ -398,17 +420,22 @@ async function handleIngest(chatId, text, messageAtMs) {
 
 async function handleAnalyze(chatId) {
   const posts = await getAllPosts();
+
   if (posts.length === 0) {
     await sendTelegramMessage(chatId, "Пока нет ни одного поста в базе. Нажми «➕ Новый пост», чтобы начать собирать.");
     return;
   }
+
   await sendTelegramMessage(chatId, "Считаю отчёт, секунду...");
+
   const stats = computeStats(posts);
+
   const report = await askClaude({
     system: SYSTEM_PROMPT,
     userMessage: `task: analyze\n\n${JSON.stringify(stats)}`,
     maxTokens: 2000,
   });
+
   await sendTelegramMessage(chatId, `Постов в базе: ${stats.totalPosts}\n\n${report}`);
 
   if (stats.byHour.length > 1) {
@@ -422,6 +449,7 @@ async function handleAnalyze(chatId) {
 async function handlePlan(chatId) {
   const posts = await getAllPosts();
   const stats = computeStats(posts);
+
   const ideasRaw = await askClaude({
     system: SYSTEM_PROMPT,
     userMessage: `task: plan\n\n${JSON.stringify(stats)}`,
@@ -429,6 +457,7 @@ async function handlePlan(chatId) {
   });
 
   const ideas = extractJson(ideasRaw);
+
   if (!Array.isArray(ideas)) {
     console.error("handlePlan: не смогла распознать JSON с идеями:", ideasRaw);
     await sendTelegramMessage(chatId, "Не получилось сгенерировать идеи, попробуй ещё раз через минуту.");
@@ -436,10 +465,36 @@ async function handlePlan(chatId) {
   }
 
   await addQueueIdeas(ideas);
+
   const list = ideas
-    .map((i, idx) => `${idx + 1}. [${i.day_of_week || "?"} ${i.suggested_slot}] ${i.topic} — ${i.angle}\n   почему: ${i.reasoning}`)
+    .map((i, idx) => `${idx + 1}. [${i.day_of_week || "?"} ${i.suggested_slot}] ${i.topic} — ${i.angle}\n почему: ${i.reasoning}`)
     .join("\n\n");
+
   await sendTelegramMessage(chatId, `Новые идеи в очереди:\n\n${list}`);
+}
+
+// Показывает уже существующие идеи в очереди (без генерации новых) —
+// вызывается по команде "план", в отличие от handlePlan(), которая
+// всегда обращается к Claude за свежими идеями.
+async function handleShowPlan(chatId) {
+  const ideas = await getQueuedIdeas();
+
+  if (ideas.length === 0) {
+    await sendTelegramMessage(
+      chatId,
+      "В очереди сейчас пусто. Нажми «💡 Идеи», чтобы сгенерировать новый план."
+    );
+    return;
+  }
+
+  const list = ideas
+    .map(
+      (i, idx) =>
+        `${idx + 1}. [${i.day_of_week || "?"} ${i.suggested_slot}] ${i.topic} — ${i.angle}\n почему: ${i.reasoning}`
+    )
+    .join("\n\n");
+
+  await sendTelegramMessage(chatId, `📋 Текущий план (${ideas.length} идей в очереди):\n\n${list}`);
 }
 
 async function handleReply(chatId, tweetText) {
@@ -448,6 +503,7 @@ async function handleReply(chatId, tweetText) {
     userMessage: `task: reply\n\n${tweetText}`,
     maxTokens: 800,
   });
+
   await sendTelegramMessage(chatId, result);
 }
 
@@ -460,6 +516,7 @@ async function handleIdeaCallback(callbackQuery) {
   const ideaId = Number(idStr);
 
   const idea = await getQueueIdeaById(ideaId);
+
   if (!idea) {
     await answerCallbackQuery(callbackQuery.id, "Эта идея уже неактуальна");
     await clearInlineButtons(chatId, messageId);
@@ -470,6 +527,7 @@ async function handleIdeaCallback(callbackQuery) {
     await setIdeaStatus(ideaId, "sent");
     await clearInlineButtons(chatId, messageId);
     await answerCallbackQuery(callbackQuery.id, "Записываю пост");
+
     // Тема/формат/дата/время уже известны из плана — сразу просим сам текст,
     // не переспрашивая то, что бот уже знает.
     await setDraft(chatId, {
@@ -496,6 +554,7 @@ async function handleIdeaCallback(callbackQuery) {
 
     const posts = await getAllPosts();
     const stats = computeStats(posts);
+
     const raw = await askClaude({
       system: SYSTEM_PROMPT,
       userMessage: `task: replan-slot\n\nSkipped idea: ${JSON.stringify({
@@ -510,6 +569,7 @@ async function handleIdeaCallback(callbackQuery) {
     });
 
     const newIdea = extractJson(raw);
+
     if (!newIdea || typeof newIdea !== "object") {
       console.error("idea_other: не смогла распознать JSON с идеей:", raw);
       await sendTelegramMessage(chatId, "Не получилось придумать замену, попробуй ещё раз через минуту.");
@@ -518,6 +578,7 @@ async function handleIdeaCallback(callbackQuery) {
 
     const newId = await addSingleQueueIdea(newIdea);
     const fullIdea = await getQueueIdeaById(newId);
+
     await sendTelegramMessage(chatId, `💡 Другой угол на тот же слот:\n${newIdea.topic} — ${newIdea.angle}\nпочему: ${newIdea.reasoning}`);
     await sendReminderForIdea(fullIdea, chatId);
   }
