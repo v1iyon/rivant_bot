@@ -177,7 +177,20 @@ export default async function handler(req, res) {
   } catch (err) {
     console.error(err);
     await clearFlow(chatId);
-    await sendTelegramMessage(chatId, `Ошибка: ${err.message}`);
+
+    const msg = err.message || "";
+    let userMessage;
+    if (err.name === "AbortError" || /fetch failed|ECONNRESET|ETIMEDOUT/i.test(msg)) {
+      // Claude API долго не отвечал (обе попытки, см. lib/claude.js) — не наша
+      // проблема, но пользователю это должно звучать по-человечески.
+      userMessage = "Claude сейчас отвечает медленнее обычного, попробуй, пожалуйста, ещё раз через минуту.";
+    } else if (/credit balance is too low/i.test(msg)) {
+      userMessage = "На балансе Anthropic закончились кредиты — это по моей части, уже разбираюсь.";
+    } else {
+      // Неожиданная ошибка — оставляем как есть, это помогает при отладке.
+      userMessage = `Ошибка: ${msg}`;
+    }
+    await sendTelegramMessage(chatId, userMessage);
   }
 
   res.status(200).send("ok");
