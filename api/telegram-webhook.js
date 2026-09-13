@@ -450,10 +450,14 @@ async function handlePlan(chatId) {
   const posts = await getAllPosts();
   const stats = computeStats(posts);
 
+  // ВАЖНО: план на неделю — это 20-25 объектов (см. prompts/system-prompt.md,
+  // секция "plan"), при 3000 токенов ответ Claude обрезался на середине
+  // массива и extractJson не мог распознать невалидный JSON. Подняли до 8000
+  // с запасом.
   const ideasRaw = await askClaude({
     system: SYSTEM_PROMPT,
     userMessage: `task: plan\n\n${JSON.stringify(stats)}`,
-    maxTokens: 3000,
+    maxTokens: 8000,
   });
 
   const ideas = extractJson(ideasRaw);
