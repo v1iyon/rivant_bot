@@ -26,6 +26,8 @@ import {
   setDraft,
   clearFlow,
   getQueuedIdeas,
+  addPendingPost,
+  deletePendingPost,
 } from "../lib/db.js";
 
 const SYSTEM_PROMPT = readFileSync(
@@ -44,7 +46,7 @@ const HELP_TEXT = `Вот что я умею:
 В любой момент шаговых вопросов можно нажать другую кнопку меню — текущий ввод отменится.
 
 Под каждым напоминанием "⏰ Пора постить" есть кнопки:
-✅ *Запостила* — сразу перейдём к записи реального поста
+✅ *Запостила* — сохраню текст поста, а цифры сама спрошу через ~20 часов, когда будет что показывать
 ⏭ *Пропустить* — идея не потеряна, просто помечается пропущенной
 🔁 *Дай другую идею* — предложу другой угол на этот же слот`;
 
@@ -180,6 +182,12 @@ export default async function handler(req, res) {
       if (pending === "awaiting_tweet") {
         await clearFlow(chatId);
         await handleReply(chatId, text);
+      } else if (pending === "newpost:text-onpost") {
+        // Особая ветка мастера: пост ТОЛЬКО ЧТО опубликован (кнопка
+        // "Запостила"), просмотров ещё физически быть не может — сохраняем
+        // факт публикации + текст в pending_posts и НЕ спрашиваем цифры
+        // сейчас. Цифры спросит api/check-metrics.js сам, через ~20 часов.
+        await handlePostedNow(chatId, pending, text);
       } else if (pending && pending.startsWith("newpost:")) {
         await handlePostWizardStep(chatId, pending, text, messageAtMs);
       } else {
@@ -209,6 +217,29 @@ export default async function handler(req, res) {
   }
 
   res.status(200).send("ok");
+}
+
+// Сохраняет только что опубликованный пост (текст + факт публикации) в
+// pending_posts, БЕЗ вопросов про просмотры/лайки — им ещё физически рано
+// быть значимыми. Метрики бот спросит сам позже, см. api/check-metrics.js.
+async function handlePostedNow(chatId, step, text) {
+  const draft = await getDraft(chatId);
+
+  await addPendingPost({
+    chatId,
+    date: draft.date,
+    time: draft.time,
+    topic: draft.topic,
+    format: draft.format,
+    text,
+  });
+
+  await clearFlow(chatId);
+
+  await sendTelegramMessage(
+    chatId,
+    `✅ Записала, что запостила: "${draft.topic}" в ${draft.time}. Через ~20 часов сама спрошу, как там цифры.`
+  );
 }
 
 async function handlePostWizardStep(chatId, step, text, messageAtMs) {
@@ -241,8 +272,8 @@ async function handlePostWizardStep(chatId, step, text, messageAtMs) {
     await setDraft(chatId, draft);
 
     if (draft.topic && draft.format) {
-      // Идея пришла из "✅ Запостила" под напоминанием — тема/формат уже
-      // известны из плана, не переспрашиваем их заново.
+      // Такое бывает, если пришли сюда не через "Запостила", а вручную
+      // указали тему/формат заранее — сразу к цифрам.
       await setPendingAction(chatId, "newpost:views");
       await sendTelegramMessage(chatId, "Сколько просмотров?", { keyboard: undefined });
     } else {
@@ -356,6 +387,12 @@ async function handlePostWizardStep(chatId, step, text, messageAtMs) {
         return;
       }
       throw err;
+    }
+
+    // Если это был отложенный запрос метрик из api/check-metrics.js — строка
+    // в pending_posts своё дело сделала, удаляем.
+    if (draft.pendingPostId) {
+      await deletePendingPost(draft.pendingPostId);
     }
 
     const er = ((draft.likes + draft.replies + draft.retweets) / (draft.views || 1)) * 100;
@@ -532,18 +569,20 @@ async function handleIdeaCallback(callbackQuery) {
     await clearInlineButtons(chatId, messageId);
     await answerCallbackQuery(callbackQuery.id, "Записываю пост");
 
-    // Тема/формат/дата/время уже известны из плана — сразу просим сам текст,
-    // не переспрашивая то, что бот уже знает.
+    // Тема/формат/дата/время уже известны из плана — сохраняем в draft, чтобы
+    // не переспрашивать их. ВАЖНО: дальше идёт особая ветка "newpost:text-onpost"
+    // (не "newpost:text") — она просит только текст и НЕ спрашивает цифры,
+    // потому что пост только что вышел и метрик по нему ещё физически нет.
     await setDraft(chatId, {
       date: todayLocal(),
       time: idea.suggested_slot,
       topic: idea.topic,
       format: idea.format,
     });
-    await setPendingAction(chatId, "newpost:text");
+    await setPendingAction(chatId, "newpost:text-onpost");
     await sendTelegramMessage(
       chatId,
-      "Отлично! Скинь точный текст поста, как он опубликован — это нужно для качественного анализа.",
+      "Отлично! Скинь точный текст поста, как он опубликован — сохраню его, а цифры сама спрошу через ~20 часов, когда будет что показывать.",
       { keyboard: undefined }
     );
   } else if (action === "idea_skip") {
