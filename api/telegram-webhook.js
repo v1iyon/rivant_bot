@@ -16,7 +16,11 @@ import { extractJson } from "../lib/parse.js";
 import {
   savePost,
   getAllPosts,
+  getRecentPosts,
+  getPostById,
+  updatePostField,
   addQueueIdeas,
+  clearQueuedIdeas,
   addSingleQueueIdea,
   getQueueIdeaById,
   setIdeaStatus,
@@ -41,6 +45,7 @@ const HELP_TEXT = `Вот что я умею:
 💡 *Идеи* — новые идеи постов на основе данных
 📋 *План* — покажу, что уже в очереди на публикацию
 ➕ *Новый пост* — запишу пост в базу, спрошу всё по шагам
+✏️ *Исправить* — поправлю цифры или текст в уже сохранённом посте
 ✍️ *Ответ на твит* — черновик ответа клиенту
 
 В любой момент шаговых вопросов можно нажать другую кнопку меню — текущий ввод отменится.
@@ -62,6 +67,34 @@ const TOPIC_KEYBOARD = {
 const YES_NO_KEYBOARD = {
   keyboard: [[{ text: "Да" }, { text: "Нет" }]],
   resize_keyboard: true,
+};
+
+const FIELD_KEYBOARD = {
+  keyboard: [
+    [{ text: "Просмотры" }, { text: "Лайки" }],
+    [{ text: "Ответы" }, { text: "Ретвиты" }],
+    [{ text: "Клики" }, { text: "Текст" }],
+    [{ text: "Отмена" }],
+  ],
+  resize_keyboard: true,
+};
+
+const FIELD_MAP = {
+  "просмотры": "views",
+  "лайки": "likes",
+  "ответы": "replies",
+  "ретвиты": "retweets",
+  "клики": "clicks",
+  "текст": "text_content",
+};
+
+const FIELD_LABELS = {
+  views: "просмотры",
+  likes: "лайки",
+  replies: "ответы",
+  retweets: "ретвиты",
+  clicks: "клики",
+  text_content: "текст",
 };
 
 const TOPIC_MAP = {
@@ -147,7 +180,7 @@ export default async function handler(req, res) {
   // "когда смотрели статистику" при записи поста, без лишнего вопроса боту.
   const messageAtMs = message.date ? message.date * 1000 : Date.now();
 
-  const MENU_BUTTONS = ["📊 Отчёт", "💡 Идеи", "➕ Новый пост", "✍️ Ответ на твит", "❓ Помощь"];
+  const MENU_BUTTONS = ["📊 Отчёт", "💡 Идеи", "➕ Новый пост", "✏️ Исправить", "✍️ Ответ на твит", "❓ Помощь"];
 
   try {
     if (text === "/start") {
@@ -167,6 +200,8 @@ export default async function handler(req, res) {
         await setDraft(chatId, {});
         await setPendingAction(chatId, "newpost:date");
         await sendTelegramMessage(chatId, "Дата поста? (например: 10 сентября, или 10.09)");
+      } else if (text === "✏️ Исправить") {
+        await handleFixStart(chatId);
       } else if (text === "✍️ Ответ на твит") {
         await setPendingAction(chatId, "awaiting_tweet");
         await sendTelegramMessage(chatId, "Скинь текст твита, на который нужно ответить.", { keyboard: undefined });
@@ -176,6 +211,8 @@ export default async function handler(req, res) {
       // обращения к Claude — в отличие от handlePlan() (кнопка "Идеи").
       await clearFlow(chatId);
       await handleShowPlan(chatId);
+    } else if (text.trim().toLowerCase() === "исправить") {
+      await handleFixStart(chatId);
     } else {
       const pending = await getPendingAction(chatId);
 
@@ -188,6 +225,8 @@ export default async function handler(req, res) {
         // факт публикации + текст в pending_posts и НЕ спрашиваем цифры
         // сейчас. Цифры спросит api/check-metrics.js сам, через ~20 часов.
         await handlePostedNow(chatId, pending, text);
+      } else if (pending && pending.startsWith("fix:")) {
+        await handleFixStep(chatId, pending, text);
       } else if (pending && pending.startsWith("newpost:")) {
         await handlePostWizardStep(chatId, pending, text, messageAtMs);
       } else {
@@ -217,6 +256,80 @@ export default async function handler(req, res) {
   }
 
   res.status(200).send("ok");
+}
+
+// --- Редактирование уже сохранённого поста ("✏️ Исправить" / команда "исправить") ---
+
+async function handleFixStart(chatId) {
+  await clearFlow(chatId);
+
+  const posts = await getRecentPosts(5);
+  if (posts.length === 0) {
+    await sendTelegramMessage(chatId, "Пока нет ни одного сохранённого поста, нечего исправлять.");
+    return;
+  }
+
+  const list = posts
+    .map((p, idx) => `${idx + 1}. ${p.post_date} ${p.post_time} — "${p.topic || "?"}", ${p.views} просм., ${p.likes} лайков`)
+    .join("\n");
+
+  // Запоминаем id-шники по номеру, чтобы на следующем шаге не гадать по тексту.
+  await setDraft(chatId, { fixCandidates: posts.map((p) => p.id) });
+  await setPendingAction(chatId, "fix:select");
+  await sendTelegramMessage(chatId, `Какой пост поправить? Напиши номер:\n\n${list}`, { keyboard: undefined });
+}
+
+async function handleFixStep(chatId, step, text) {
+  const draft = await getDraft(chatId);
+
+  if (step === "fix:select") {
+    const n = Number(text.trim());
+    const postId = draft.fixCandidates?.[n - 1];
+    if (!postId) {
+      await sendTelegramMessage(chatId, "Не поняла номер. Напиши цифру из списка выше.");
+      return;
+    }
+    await setDraft(chatId, { fixPostId: postId });
+    await setPendingAction(chatId, "fix:field");
+    await sendTelegramMessage(chatId, "Что поправить?", { keyboard: FIELD_KEYBOARD });
+  } else if (step === "fix:field") {
+    const t = text.trim().toLowerCase();
+    if (t === "отмена") {
+      await clearFlow(chatId);
+      await sendTelegramMessage(chatId, "Ок, отменила.", { keyboard: undefined });
+      return;
+    }
+    const field = FIELD_MAP[t];
+    if (!field) {
+      await sendTelegramMessage(chatId, "Выбери одну из кнопок ниже.", { keyboard: FIELD_KEYBOARD });
+      return;
+    }
+    await setDraft(chatId, { ...draft, fixField: field });
+    await setPendingAction(chatId, "fix:value");
+    const prompt = field === "text_content" ? "Пришли новый текст поста." : `Новое значение для "${FIELD_LABELS[field]}"?`;
+    await sendTelegramMessage(chatId, prompt, { keyboard: undefined });
+  } else if (step === "fix:value") {
+    const { fixPostId, fixField } = draft;
+    let value;
+
+    if (fixField === "text_content") {
+      value = text;
+    } else {
+      value = parseNumber(text);
+      if (value === null) {
+        await sendTelegramMessage(chatId, "Введи число, например 4200");
+        return;
+      }
+    }
+
+    const updated = await updatePostField(fixPostId, fixField, value);
+    await clearFlow(chatId);
+
+    await sendTelegramMessage(
+      chatId,
+      `✅ Поправила: у поста от ${updated.post_date} ${updated.post_time} теперь "${FIELD_LABELS[fixField]}" = ${fixField === "text_content" ? `"${value}"` : value}. Новый ER: ${updated.engagement_rate.toFixed(1)}%`
+    );
+  }
 }
 
 // Сохраняет только что опубликованный пост (текст + факт публикации) в
@@ -487,7 +600,7 @@ async function handlePlan(chatId) {
   const posts = await getAllPosts();
   const stats = computeStats(posts);
 
-  // ВАЖНО: план на неделю — это 20-25 объектов (см. prompts/system-prompt.md,
+  // ВАЖНО: план на неделю — это ~29 объектов (см. prompts/system-prompt.md,
   // секция "plan"), при 3000 токенов ответ Claude обрезался на середине
   // массива и extractJson не мог распознать невалидный JSON. Подняли до 8000
   // с запасом.
@@ -505,6 +618,11 @@ async function handlePlan(chatId) {
     return;
   }
 
+  // Новый план ЗАМЕНЯЕТ старый, а не складывается поверх него — иначе при
+  // повторном нажатии "Идеи" очередь удваивается: одни и те же слоты
+  // получают по 2-3 конкурирующие идеи, и часть из них никогда не будет
+  // использована, просто засоряя очередь.
+  await clearQueuedIdeas();
   await addQueueIdeas(ideas);
 
   const list = ideas
