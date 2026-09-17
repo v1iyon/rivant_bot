@@ -32,6 +32,11 @@ import {
   getQueuedIdeas,
   addPendingPost,
   deletePendingPost,
+  clearQueuedEngagementIdeas,
+  addEngagementIdeas,
+  getEngagementIdeaById,
+  setEngagementStatus,
+  getQueuedEngagementIdeas,
 } from "../lib/db.js";
 
 const SYSTEM_PROMPT = readFileSync(
@@ -53,7 +58,11 @@ const HELP_TEXT = `Вот что я умею:
 Под каждым напоминанием "⏰ Пора постить" есть кнопки:
 ✅ *Запостила* — сохраню текст поста, а цифры сама спрошу через ~20 часов, когда будет что показывать
 ⏭ *Пропустить* — идея не потеряна, просто помечается пропущенной
-🔁 *Дай другую идею* — предложу другой угол на этот же слот`;
+🔁 *Дай другую идею* — предложу другой угол на этот же слот
+
+Раз в неделю (вместе с планом постов) я также планирую, когда тебе стоит отвечать на чужие твиты — раз в день пришлю "💬 Пора отвечать на чужие твиты" с 2-3 поисковыми запросами и тем, скольким людям стоит ответить. Кнопки под этим напоминанием:
+✅ *Сделала* — отмечу сессию выполненной
+⏭ *Пропустить* — сессия не потеряна, просто помечается пропущенной`;
 
 const TOPIC_KEYBOARD = {
   keyboard: [
@@ -158,10 +167,17 @@ export default async function handler(req, res) {
 
   const update = req.body;
 
-  // Нажатие инлайн-кнопки под напоминанием ("Запостила" / "Пропустить" / "Другую идею")
+  // Нажатие инлайн-кнопки под напоминанием: либо про пост ("Запостила" /
+  // "Пропустить" / "Другую идею"), либо про сессию вовлечения ("Сделала" /
+  // "Пропустить") — различаем по префиксу callback_data.
   if (update?.callback_query) {
     try {
-      await handleIdeaCallback(update.callback_query);
+      const action = (update.callback_query.data || "").split(":")[0];
+      if (action.startsWith("engagement_")) {
+        await handleEngagementCallback(update.callback_query);
+      } else {
+        await handleIdeaCallback(update.callback_query);
+      }
     } catch (err) {
       console.error(err);
     }
@@ -600,17 +616,30 @@ async function handlePlan(chatId) {
   const posts = await getAllPosts();
   const stats = computeStats(posts);
 
-  // ВАЖНО: план на неделю — это ~29 объектов (см. prompts/system-prompt.md,
-  // секция "plan"), при 3000 токенов ответ Claude обрезался на середине
-  // массива и extractJson не мог распознать невалидный JSON. Подняли до 8000
-  // с запасом.
-  const ideasRaw = await askClaude({
-    system: SYSTEM_PROMPT,
-    userMessage: `task: plan\n\n${JSON.stringify(stats)}`,
-    maxTokens: 8000,
-  });
+  // Контент-план и engagement-план генерируются ДВУМЯ отдельными вызовами
+  // Claude (разные форматы вывода, system-prompt.md явно требует не
+  // смешивать задачи в одном ответе), но ПАРАЛЛЕЛЬНО через Promise.all —
+  // не последовательно, иначе суммарное время легко упрётся в 60-секундный
+  // лимит Vercel (см. lib/claude.js про TIMEOUT_MS=42000 на один вызов).
+  const [ideasRaw, engagementRaw] = await Promise.all([
+    // ВАЖНО: план на неделю — это ~29 объектов (см. prompts/system-prompt.md,
+    // секция "plan"), при 3000 токенов ответ Claude обрезался на середине
+    // массива и extractJson не мог распознать невалидный JSON. Подняли до 8000
+    // с запасом.
+    askClaude({
+      system: SYSTEM_PROMPT,
+      userMessage: `task: plan\n\n${JSON.stringify(stats)}`,
+      maxTokens: 8000,
+    }),
+    askClaude({
+      system: SYSTEM_PROMPT,
+      userMessage: `task: engagement-plan\n\n${JSON.stringify(stats)}`,
+      maxTokens: 2500,
+    }),
+  ]);
 
   const ideas = extractJson(ideasRaw);
+  const engagementSessions = extractJson(engagementRaw);
 
   if (!Array.isArray(ideas)) {
     console.error("handlePlan: не смогла распознать JSON с идеями:", ideasRaw);
@@ -630,15 +659,38 @@ async function handlePlan(chatId) {
     .join("\n\n");
 
   await sendTelegramMessage(chatId, `Новые идеи в очереди:\n\n${list}`);
+
+  if (Array.isArray(engagementSessions)) {
+    await clearQueuedEngagementIdeas();
+    await addEngagementIdeas(engagementSessions);
+
+    const engList = engagementSessions
+      .map((s, idx) => {
+        const topics = (s.topics || []).map((t) => `«${t.search_query}»`).join(", ");
+        return `${idx + 1}. [${s.day_of_week || "?"} ${s.suggested_slot}] ${topics} — ответить ~${s.target_count} людям\n почему: ${s.reasoning}`;
+      })
+      .join("\n\n");
+
+    await sendTelegramMessage(chatId, `💬 План ответов на чужие твиты на неделю:\n\n${engList}`);
+  } else {
+    console.error("handlePlan: не смогла распознать JSON с engagement-планом:", engagementRaw);
+    await sendTelegramMessage(
+      chatId,
+      "⚠️ План ответов на чужие твиты сгенерировать не смогла — Клод ответил не в ожидаемом формате. Напиши «идеи» ещё раз, чтобы попробовать снова."
+    );
+  }
 }
 
 // Показывает уже существующие идеи в очереди (без генерации новых) —
 // вызывается по команде "план", в отличие от handlePlan(), которая
 // всегда обращается к Claude за свежими идеями.
 async function handleShowPlan(chatId) {
-  const ideas = await getQueuedIdeas();
+  const [ideas, engagementSessions] = await Promise.all([
+    getQueuedIdeas(),
+    getQueuedEngagementIdeas(),
+  ]);
 
-  if (ideas.length === 0) {
+  if (ideas.length === 0 && engagementSessions.length === 0) {
     await sendTelegramMessage(
       chatId,
       "В очереди сейчас пусто. Нажми «💡 Идеи», чтобы сгенерировать новый план."
@@ -646,14 +698,30 @@ async function handleShowPlan(chatId) {
     return;
   }
 
-  const list = ideas
-    .map(
-      (i, idx) =>
-        `${idx + 1}. [${i.day_of_week || "?"} ${i.suggested_slot}] ${i.topic} — ${i.angle}\n почему: ${i.reasoning}`
-    )
-    .join("\n\n");
+  if (ideas.length > 0) {
+    const list = ideas
+      .map(
+        (i, idx) =>
+          `${idx + 1}. [${i.day_of_week || "?"} ${i.suggested_slot}] ${i.topic} — ${i.angle}\n почему: ${i.reasoning}`
+      )
+      .join("\n\n");
 
-  await sendTelegramMessage(chatId, `📋 Текущий план (${ideas.length} идей в очереди):\n\n${list}`);
+    await sendTelegramMessage(chatId, `📋 Текущий план постов (${ideas.length} идей в очереди):\n\n${list}`);
+  }
+
+  if (engagementSessions.length > 0) {
+    const engList = engagementSessions
+      .map((s, idx) => {
+        const topics = (s.topics || []).map((t) => `«${t.search_query}»`).join(", ");
+        return `${idx + 1}. [${s.day_of_week || "?"} ${s.suggested_slot}] ${topics} — ответить ~${s.target_count} людям\n почему: ${s.reasoning}`;
+      })
+      .join("\n\n");
+
+    await sendTelegramMessage(
+      chatId,
+      `💬 Текущий план ответов на чужие твиты (${engagementSessions.length} сессий в очереди):\n\n${engList}`
+    );
+  }
 }
 
 async function handleReply(chatId, tweetText) {
@@ -742,5 +810,36 @@ async function handleIdeaCallback(callbackQuery) {
 
     await sendTelegramMessage(chatId, `💡 Другой угол на тот же слот:\n${newIdea.topic} — ${newIdea.angle}\nпочему: ${newIdea.reasoning}`);
     await sendReminderForIdea(fullIdea, chatId);
+  }
+}
+
+// Обрабатывает нажатие одной из двух кнопок под напоминанием
+// "💬 Пора отвечать на чужие твиты": engagement_done:<id> / engagement_skip:<id>.
+// Проще, чем handleIdeaCallback — тут нет "другого угла" и нет отдельного
+// мастера сохранения поста, просто фиксируем статус сессии.
+async function handleEngagementCallback(callbackQuery) {
+  const chatId = callbackQuery.message.chat.id;
+  const messageId = callbackQuery.message.message_id;
+  const [action, idStr] = (callbackQuery.data || "").split(":");
+  const sessionId = Number(idStr);
+
+  const session = await getEngagementIdeaById(sessionId);
+
+  if (!session) {
+    await answerCallbackQuery(callbackQuery.id, "Эта сессия уже неактуальна");
+    await clearInlineButtons(chatId, messageId);
+    return;
+  }
+
+  if (action === "engagement_done") {
+    await setEngagementStatus(sessionId, "done");
+    await clearInlineButtons(chatId, messageId);
+    await answerCallbackQuery(callbackQuery.id, "Отметила как сделано");
+    await sendTelegramMessage(chatId, "🙌 Записала. Если найдёшь твит, на который стоит ответить — кидай его текст, предложу черновик.");
+  } else if (action === "engagement_skip") {
+    await setEngagementStatus(sessionId, "skipped");
+    await clearInlineButtons(chatId, messageId);
+    await answerCallbackQuery(callbackQuery.id, "Пропущено");
+    await sendTelegramMessage(chatId, "Ок, пропускаю эту сессию вовлечения.");
   }
 }

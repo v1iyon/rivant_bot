@@ -38,6 +38,22 @@ CREATE TABLE IF NOT EXISTS content_queue (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Очередь "сессий вовлечения" — раз в неделю Клод решает, в какой день/час
+-- лучше поискать чужие твиты потенциальных клиентов и ответить на них.
+-- Одна строка = одна сессия на один день (в отличие от content_queue, где
+-- строка = один пост) — потому что человек ищет и отвечает пачкой за один
+-- присест, а не по одному запросу за раз.
+CREATE TABLE IF NOT EXISTS engagement_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day_of_week TEXT,               -- 'Mon'..'Sun'
+  suggested_slot TEXT,            -- 'HH:MM', локальное время автора
+  topics TEXT NOT NULL,           -- JSON: [{"search_query":"shopify cash flow","angle":"..."}, ...]
+  target_count INTEGER DEFAULT 7, -- скольким людям ответить за эту сессию
+  reasoning TEXT,
+  status TEXT DEFAULT 'queued',   -- queued / reminded / done / skipped
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS chat_state (
   chat_id TEXT PRIMARY KEY,
   last_report_at TEXT,
