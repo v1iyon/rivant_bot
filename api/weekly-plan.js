@@ -1,3 +1,4 @@
+import { waitUntil } from "@vercel/functions";
 import { getAllPosts, addQueueIdeas } from "../lib/db.js";
 import { computeStats } from "../lib/analytics.js";
 import { askClaude } from "../lib/claude.js";
@@ -11,17 +12,20 @@ const SYSTEM_PROMPT = readFileSync(
   "utf-8"
 );
 
-export default async function handler(req, res) {
-  if (req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
-    return res.status(401).send("unauthorized");
-  }
+// Таймаут вызова Claude для плана. Должен быть меньше maxDuration функции
+// (60 с в vercel.json): ещё ~5-8 с нужно на чтение БД, запись идей в БД и
+// отправку в Telegram.
+const PLAN_TIMEOUT_MS = 50000;
 
-  const chatId = process.env.FOUNDER_CHAT_ID;
-
+// Вся тяжёлая работа — здесь. Запускается в фоне (waitUntil), поэтому
+// cron-job.org не ждёт её завершения и не упирается в свой 30-секундный
+// лимит ответа. Функция сама шлёт в Telegram и результат, и ошибку.
+async function generateAndSendPlan(chatId) {
   try {
     const posts = await getAllPosts();
     if (posts.length === 0) {
-      return res.status(200).send("no posts yet");
+      console.log("weekly-plan: постов ещё нет, план не генерируем");
+      return;
     }
 
     const stats = computeStats(posts);
@@ -34,17 +38,17 @@ export default async function handler(req, res) {
       system: SYSTEM_PROMPT,
       userMessage: `task: plan\n\n${JSON.stringify(stats)}`,
       maxTokens: 8000,
+      timeoutMs: PLAN_TIMEOUT_MS,
     });
 
     const ideas = extractJson(ideasRaw);
-
     if (!Array.isArray(ideas)) {
       console.error("weekly-plan: не смогла распознать JSON с идеями:", ideasRaw);
       await sendTelegramMessage(
         chatId,
         "⚠️ План на неделю сгенерировать не смогла — Клод ответил не в ожидаемом формате. Напиши мне «идеи», чтобы попробовать ещё раз."
       );
-      return res.status(200).send("ideas parse failed");
+      return;
     }
 
     await addQueueIdeas(ideas);
@@ -57,15 +61,28 @@ export default async function handler(req, res) {
       chatId,
       `💡 План на неделю (буду сама напоминать в эти часы):\n\n${list}`
     );
-
-    res.status(200).send("plan sent");
   } catch (err) {
     console.error("weekly-plan: ошибка", err);
+    const reason =
+      err.name === "AbortError"
+        ? "Claude не уложился по времени (таймаут)"
+        : err.message;
     try {
-      await sendTelegramMessage(chatId, `⚠️ План на неделю не удалось сгенерировать — ошибка: ${err.message}`);
+      await sendTelegramMessage(chatId, `⚠️ План на неделю не удалось сгенерировать — ошибка: ${reason}`);
     } catch (notifyErr) {
       console.error("weekly-plan: не удалось даже уведомить об ошибке", notifyErr);
     }
-    res.status(200).send("failed, notified if possible");
   }
+}
+
+export default async function handler(req, res) {
+  if (req.headers["x-cron-secret"] !== process.env.CRON_SECRET) {
+    return res.status(401).send("unauthorized");
+  }
+
+  const chatId = process.env.FOUNDER_CHAT_ID;
+
+  // Отвечаем крону сразу, а генерацию продолжаем в фоне.
+  waitUntil(generateAndSendPlan(chatId));
+  res.status(200).send("plan generation started");
 }
