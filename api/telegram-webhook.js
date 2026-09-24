@@ -487,6 +487,20 @@ async function handlePostWizardStep(chatId, step, text, messageAtMs) {
       return;
     }
     draft.retweets = n;
+
+    // Если ссылки в посте не было (draft.had_link === false, шаг "newpost:link"
+    // выше в мастере) — переходов по ссылке в принципе быть не может, не
+    // спрашиваем про них, сразу фиксируем 0 и сохраняем пост. Если had_link
+    // не задан вовсе (например, черновик пришёл из api/check-metrics.js, где
+    // этот шаг не спрашивался) — на всякий случай ведём себя как раньше и
+    // спрашиваем, чтобы не потерять реальные клики по неизвестности.
+    if (draft.had_link === false) {
+      draft.clicks = 0;
+      await setDraft(chatId, draft);
+      await finalizeNewPost(chatId, draft, messageAtMs);
+      return;
+    }
+
     await setDraft(chatId, draft);
     await setPendingAction(chatId, "newpost:clicks");
     await sendTelegramMessage(chatId, "Сколько переходов по ссылке? (0, если не считала)");
@@ -497,46 +511,53 @@ async function handlePostWizardStep(chatId, step, text, messageAtMs) {
       return;
     }
     draft.clicks = n;
-
-    // Финал — сохраняем. hours_since_post считаем автоматически по моменту
-    // отправки ЭТОГО сообщения (messageAtMs) относительно даты+времени поста —
-    // без лишнего вопроса "через сколько часов ты смотришь статистику".
-    const hoursSince = hoursSincePost(draft.date, draft.time, messageAtMs);
-    draft.hours_since_post = hoursSince;
-    draft.metrics_checked_at = new Date(messageAtMs).toISOString();
-
-    try {
-      await savePost(draft);
-    } catch (err) {
-      if (err.code === "DUPLICATE_POST") {
-        // Не сбрасываем draft — человек может просто прислать новое время,
-        // не заполняя весь мастер заново с нуля.
-        await setPendingAction(chatId, "newpost:time");
-        await sendTelegramMessage(chatId, `${err.message}\n\nПришли другое время для этого же поста.`, { keyboard: undefined });
-        return;
-      }
-      throw err;
-    }
-
-    // Если это был отложенный запрос метрик из api/check-metrics.js — строка
-    // в pending_posts своё дело сделала, удаляем.
-    if (draft.pendingPostId) {
-      await deletePendingPost(draft.pendingPostId);
-    }
-
-    const er = ((draft.likes + draft.replies + draft.retweets) / (draft.views || 1)) * 100;
-    await clearFlow(chatId);
-
-    const timingNote =
-      hoursSince !== null
-        ? ` (замер через ~${hoursSince}ч после поста)`
-        : "";
-
-    await sendTelegramMessage(
-      chatId,
-      `✅ Записала: ${draft.date} ${draft.time}, тема "${draft.topic}", ${draft.views} просмотров, ER ${er.toFixed(1)}%${timingNote}`
-    );
+    await finalizeNewPost(chatId, draft, messageAtMs);
   }
+}
+
+// Сохраняет черновик поста в базу и шлёт подтверждение. Общий финальный шаг
+// для обоих путей мастера: с вопросом про клики (была ссылка) и без него
+// (ссылки не было, clicks сразу 0) — чтобы не дублировать сохранение и текст
+// подтверждения в двух местах.
+async function finalizeNewPost(chatId, draft, messageAtMs) {
+  // hours_since_post считаем автоматически по моменту отправки ЭТОГО
+  // сообщения (messageAtMs) относительно даты+времени поста — без лишнего
+  // вопроса "через сколько часов ты смотришь статистику".
+  const hoursSince = hoursSincePost(draft.date, draft.time, messageAtMs);
+  draft.hours_since_post = hoursSince;
+  draft.metrics_checked_at = new Date(messageAtMs).toISOString();
+
+  try {
+    await savePost(draft);
+  } catch (err) {
+    if (err.code === "DUPLICATE_POST") {
+      // Не сбрасываем draft — человек может просто прислать новое время,
+      // не заполняя весь мастер заново с нуля.
+      await setPendingAction(chatId, "newpost:time");
+      await sendTelegramMessage(chatId, `${err.message}\n\nПришли другое время для этого же поста.`, { keyboard: undefined });
+      return;
+    }
+    throw err;
+  }
+
+  // Если это был отложенный запрос метрик из api/check-metrics.js — строка
+  // в pending_posts своё дело сделала, удаляем.
+  if (draft.pendingPostId) {
+    await deletePendingPost(draft.pendingPostId);
+  }
+
+  const er = ((draft.likes + draft.replies + draft.retweets) / (draft.views || 1)) * 100;
+  await clearFlow(chatId);
+
+  const timingNote =
+    hoursSince !== null
+      ? ` (замер через ~${hoursSince}ч после поста)`
+      : "";
+
+  await sendTelegramMessage(
+    chatId,
+    `✅ Записала: ${draft.date} ${draft.time}, тема "${draft.topic}", ${draft.views} просмотров, ER ${er.toFixed(1)}%${timingNote}`
+  );
 }
 
 async function handleIngest(chatId, text, messageAtMs) {
