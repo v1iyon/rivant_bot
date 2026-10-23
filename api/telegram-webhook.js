@@ -11,7 +11,7 @@ import {
 import { computeStats } from "../lib/analytics.js";
 import { barChart } from "../lib/charts.js";
 import { sendReminderForIdea } from "../lib/reminder.js";
-import { hoursSincePost, todayLocal } from "../lib/time.js";
+import { hoursSincePost, todayLocal, nowParts } from "../lib/time.js";
 import { extractJson } from "../lib/parse.js";
 import {
   savePost,
@@ -776,13 +776,24 @@ async function handleIdeaCallback(callbackQuery) {
     await clearInlineButtons(chatId, messageId);
     await answerCallbackQuery(callbackQuery.id, "Записываю пост");
 
-    // Тема/формат/дата/время уже известны из плана — сохраняем в draft, чтобы
-    // не переспрашивать их. ВАЖНО: дальше идёт особая ветка "newpost:text-onpost"
+    // Тема/формат/дата уже известны из плана — сохраняем в draft, чтобы не
+    // переспрашивать их. ВАЖНО: дальше идёт особая ветка "newpost:text-onpost"
     // (не "newpost:text") — она просит только текст и НЕ спрашивает цифры,
     // потому что пост только что вышел и метрик по нему ещё физически нет.
+    //
+    // Время — НЕ idea.suggested_slot (запланированный слот, например 10:30):
+    // человек реально публикует пост раньше или позже плана (например в
+    // 10:03), и "Запостила" нажимается как раз в момент публикации — поэтому
+    // берём текущее время сервера в её таймзоне. Это важно не только для
+    // отображения: именно post_time потом участвует в аналитике "в какие
+    // часы заходит лучше" (byHour/byWeekday) — плановый слот там только
+    // шумел бы.
+    const { hour: postedHour, minute: postedMinute } = nowParts();
+    const actualTime = `${String(postedHour).padStart(2, "0")}:${String(postedMinute).padStart(2, "0")}`;
+
     await setDraft(chatId, {
       date: todayLocal(),
-      time: idea.suggested_slot,
+      time: actualTime,
       topic: idea.topic,
       format: idea.format,
     });
